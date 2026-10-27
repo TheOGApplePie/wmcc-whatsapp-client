@@ -1,8 +1,12 @@
 import { body } from 'express-validator';
-export const checkMessageMiddleware =[
-  body('message').notEmpty().withMessage("The message property is required").isString().withMessage("The message must be a string").escape(),
-  body('mediaUrl').optional().isURL().withMessage("The mediaUrl must be a valid URL").custom(value => {
-    const domainRegex = /^https?:\/\/gkpctbvyswcfccogoepl\.supabase\.co\/storage\/v1\/object\/public\/event-posters\/public\/([^?#]+)/
-    return domainRegex.test(value)
-}).withMessage("This media cannot be used in the whatsapp message service. Please upload the file and use the supabase URL")
-]
+export const checkMessageMiddleware = [
+  body('message').isString().bail().custom(v => v.trim().length > 0).withMessage('A nonempty message is required'),
+  body('mediaUrl').optional().isString().bail().custom(value => {
+    try {
+      const url = new URL(value);
+      return url.protocol === 'https:' && url.hostname === 'gkpctbvyswcfccogoepl.supabase.co'
+        && !url.username && !url.password && !url.port
+        && url.pathname.startsWith('/storage/v1/object/public/event-posters/public/');
+    } catch { return false; }
+  }).withMessage('Use an approved poster URL'),
+];
