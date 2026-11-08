@@ -6,10 +6,27 @@ import { errorHandler } from "./error.js";
 import app from "./server.js";
 import { startWhatsApp, stopWhatsApp } from "./whatsapp/baileys-client.js";
 import { groupId } from "./config.js";
+import {
+  serviceTokenMiddleware,
+  servicePublisherMiddleware,
+} from "./middleware/service-publish.js";
+import { checkMessageMiddleware } from "./middleware/whatsapp.js";
+import { handleValidationErrors } from "./error.js";
+import { sendAnnouncement } from "./controllers/whatsapp.js";
 
 // Validate the destination before starting either service.
 groupId();
 await startWhatsApp();
+// Machine publishing has a separate credential; user session routes retain user authentication.
+app.post(
+  "/api/whatsapp/publish",
+  serviceTokenMiddleware,
+  express.json({ limit: "64kb" }),
+  servicePublisherMiddleware,
+  checkMessageMiddleware,
+  handleValidationErrors,
+  sendAnnouncement,
+);
 // Verify access before parsing content; the router then validates and sends it.
 app.use(
   "/api/whatsapp",

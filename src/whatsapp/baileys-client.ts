@@ -5,7 +5,10 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { authDirectory } from "../config.js";
 import { HttpError } from "../error.js";
-import { supabaseOwnership, type WhatsAppOwnership } from "../services/ownership.js";
+import {
+  supabaseOwnership,
+  type WhatsAppOwnership,
+} from "../services/ownership.js";
 import { createSessionStore, requireUserId } from "./session-store.js";
 
 type Socket = ReturnType<typeof makeWASocket>;
@@ -14,7 +17,13 @@ export type SessionState =
   | { status: "connecting" }
   | { status: "connected" }
   | { status: "linking"; qr?: string }
-  | { status: "failed"; reason: "account_claimed" | "user_has_other_account" | "claim_unavailable" };
+  | {
+      status: "failed";
+      reason:
+        | "account_claimed"
+        | "user_has_other_account"
+        | "claim_unavailable";
+    };
 type Session = {
   userId: string;
   jid?: string;
@@ -45,9 +54,14 @@ export function createSessionManager(options: {
 }) {
   const store = createSessionStore(options.root);
   const sessions = new Map<string, Session>();
-  const failures = new Map<string, Extract<SessionState, { status: "failed" }>["reason"]>();
+  const failures = new Map<
+    string,
+    Extract<SessionState, { status: "failed" }>["reason"]
+  >();
   const cleanups = new Map<string, Promise<void>>();
-  const makeSocket = options.makeSocket ?? ((auth) => makeWASocket({ auth }));
+  const makeSocket =
+    options.makeSocket ??
+    ((auth) => makeWASocket({ auth, markOnlineOnConnect: false }));
   const loadAuth = options.loadAuth ?? useMultiFileAuthState;
   let started: Promise<void> | undefined;
   let stopping = false;
@@ -55,7 +69,8 @@ export function createSessionManager(options: {
   function stateOf(session?: Session): SessionState {
     if (!session) return { status: "disconnected" };
     if (session.connected) return { status: "connected" };
-    if (!session.linking && (session.socket || session.opening)) return { status: "connecting" };
+    if (!session.linking && (session.socket || session.opening))
+      return { status: "connecting" };
     if (!session.linking) return { status: "disconnected" };
     if (session.qr) return { status: "linking", qr: session.qr };
     return { status: "linking" };
@@ -109,7 +124,10 @@ export function createSessionManager(options: {
         "Local session removed; WhatsApp unlink could not be confirmed",
       );
   }
-  function failPairing(s: Session, reason: Extract<SessionState, { status: "failed" }>["reason"]) {
+  function failPairing(
+    s: Session,
+    reason: Extract<SessionState, { status: "failed" }>["reason"],
+  ) {
     failures.set(s.userId, reason);
     const cleanup = remove(s, false);
     cleanups.set(s.userId, cleanup);
@@ -131,13 +149,15 @@ export function createSessionManager(options: {
       // Baileys emits this whenever credentials or Signal keys change. Do not
       // filter these writes: every key is required for a future reconnect.
       const onCreds = () => {
-        s.credentialWrite = (s.credentialWrite ?? Promise.resolve()).then(saveCreds).catch(() => {
-          finishQr(
-            s,
-            new HttpError(503, "WhatsApp credential persistence failed"),
-          );
-          void remove(s, false);
-        });
+        s.credentialWrite = (s.credentialWrite ?? Promise.resolve())
+          .then(saveCreds)
+          .catch(() => {
+            finishQr(
+              s,
+              new HttpError(503, "WhatsApp credential persistence failed"),
+            );
+            void remove(s, false);
+          });
       };
       // QR, open, and close are the only lifecycle events this service needs.
       const onUpdate = (update: {
@@ -171,17 +191,23 @@ export function createSessionManager(options: {
           // restore it later; runtime state stays in memory only.
           Promise.resolve()
             .then(async () => {
-              if ([...sessions.values()].some(
-                (other) => other !== s && other.jid === jid,
-              ))
+              if (
+                [...sessions.values()].some(
+                  (other) => other !== s && other.jid === jid,
+                )
+              )
                 throw new HttpError(409, "account_claimed");
               if (s.linking) {
                 const token = s.pairingToken!;
                 const result = await options.ownership.claim(token, jid);
-                if (result === "account_claimed" || result === "user_has_other_account")
+                if (
+                  result === "account_claimed" ||
+                  result === "user_has_other_account"
+                )
                   throw new HttpError(409, result);
                 if (!s.linking || sessions.get(s.userId) !== s) {
-                  if (result === "claimed") await options.ownership.release(token);
+                  if (result === "claimed")
+                    await options.ownership.release(token);
                   return;
                 }
               }
@@ -201,9 +227,14 @@ export function createSessionManager(options: {
                   : new Error("Session could not be saved"),
               );
               if (s.linking && sessions.get(s.userId) === s)
-                failPairing(s, e instanceof HttpError && e.statusCode === 409
-                  ? e.message as "account_claimed" | "user_has_other_account"
-                  : "claim_unavailable");
+                failPairing(
+                  s,
+                  e instanceof HttpError && e.statusCode === 409
+                    ? (e.message as
+                        | "account_claimed"
+                        | "user_has_other_account")
+                    : "claim_unavailable",
+                );
             });
         }
         if (update.connection === "close") {
@@ -292,6 +323,10 @@ export function createSessionManager(options: {
           };
           sessions.set(userId, s);
         }
+        // Restore saved accounts on deployment without requiring a new user JWT.
+        await Promise.all(
+          [...sessions.values()].filter((s) => s.jid).map((s) => open(s)),
+        );
       })();
       return started;
     },
@@ -305,7 +340,10 @@ export function createSessionManager(options: {
         throw new HttpError(409, "WhatsApp account is already linked");
       if (existing?.jid) {
         const result = await options.ownership.claim(token, existing.jid);
-        if (result === "account_claimed" || result === "user_has_other_account") {
+        if (
+          result === "account_claimed" ||
+          result === "user_has_other_account"
+        ) {
           failures.set(userId, result);
           await remove(existing, false);
           return { status: "failed" as const, reason: result };
@@ -338,7 +376,9 @@ export function createSessionManager(options: {
     status(userId: string) {
       userId = requireUserId(userId);
       const failure = failures.get(userId);
-      return failure ? { status: "failed" as const, reason: failure } : stateOf(sessions.get(userId));
+      return failure
+        ? { status: "failed" as const, reason: failure }
+        : stateOf(sessions.get(userId));
     },
     socket(userId: string) {
       const s = sessions.get(requireUserId(userId));
@@ -353,8 +393,11 @@ export function createSessionManager(options: {
       const s = sessions.get(userId);
       let unlinkError: unknown;
       if (s) {
-        try { await remove(s, Boolean(s.jid)); }
-        catch (error) { unlinkError = error; }
+        try {
+          await remove(s, Boolean(s.jid));
+        } catch (error) {
+          unlinkError = error;
+        }
       }
       const released = await options.ownership.release(token);
       const hadFailure = failures.has(userId);
@@ -384,7 +427,10 @@ export function createSessionManager(options: {
 
 let manager: ReturnType<typeof createSessionManager> | undefined;
 export function whatsAppSessions() {
-  return (manager ??= createSessionManager({ root: authDirectory(), ownership: supabaseOwnership }));
+  return (manager ??= createSessionManager({
+    root: authDirectory(),
+    ownership: supabaseOwnership,
+  }));
 }
 export function startWhatsApp() {
   return whatsAppSessions().start();

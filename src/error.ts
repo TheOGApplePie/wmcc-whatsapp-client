@@ -12,7 +12,14 @@ export class HttpError extends Error {
 }
 /** Translate failures to HTTP responses without exposing unexpected internal errors. */
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
-  const status = err instanceof HttpError ? err.statusCode : 500;
+  const status =
+    err instanceof HttpError
+      ? err.statusCode
+      : err?.type === "entity.parse.failed"
+        ? 400
+        : err?.type === "entity.too.large"
+          ? 413
+          : 500;
   res.status(status).json({
     success: false,
     message: status === 500 ? "Internal server error" : err.message,
@@ -22,7 +29,13 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 export const handleValidationErrors: RequestHandler = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    res.status(400).json({ errors: errors.array() });
+    res
+      .status(400)
+      .json({
+        success: false,
+        message: "Invalid publishing request",
+        errors: errors.array(),
+      });
     return;
   }
   next();
