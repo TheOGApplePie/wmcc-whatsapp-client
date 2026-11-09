@@ -33,6 +33,9 @@ type Session = {
   linking: boolean;
   pairingToken?: string;
   timer?: ReturnType<typeof setTimeout>;
+  reconnectTimer?: ReturnType<typeof setTimeout>;
+  reconnectAttempts?: number;
+  removed?: boolean;
   opening?: Promise<void>;
   credentialWrite?: Promise<void>;
   qrPromise?: Promise<SessionState>;
@@ -69,7 +72,10 @@ export function createSessionManager(options: {
   function stateOf(session?: Session): SessionState {
     if (!session) return { status: "disconnected" };
     if (session.connected) return { status: "connected" };
-    if (!session.linking && (session.socket || session.opening))
+    if (
+      !session.linking &&
+      (session.socket || session.opening || session.reconnectTimer)
+    )
       return { status: "connecting" };
     if (!session.linking) return { status: "disconnected" };
     if (session.qr) return { status: "linking", qr: session.qr };
@@ -88,6 +94,8 @@ export function createSessionManager(options: {
 
   /** Stop a socket and release the timer/listeners owned by this session. */
   function closeSocket(session: Session) {
+    clearTimeout(session.reconnectTimer);
+    session.reconnectTimer = undefined;
     clearTimeout(session.timer);
     session.timer = undefined;
     session.detach?.();
@@ -96,6 +104,9 @@ export function createSessionManager(options: {
     session.socket = undefined;
   }
   async function remove(s: Session, logout: boolean) {
+    s.removed = true;
+    clearTimeout(s.reconnectTimer);
+    s.reconnectTimer = undefined;
     s.linking = false;
     s.connected = false;
     s.qr = undefined;
@@ -136,14 +147,35 @@ export function createSessionManager(options: {
       () => cleanups.delete(s.userId),
     );
   }
+  /** Retry saved accounts indefinitely, with a delay capped at 30 seconds. */
+  function scheduleReconnect(s: Session) {
+    if (stopping || s.removed || !s.jid || s.linking || s.reconnectTimer)
+      return;
+    const attempt = s.reconnectAttempts ?? 0;
+    const delay = Math.min(1_000 * 2 ** Math.min(attempt, 5), 30_000);
+    s.reconnectAttempts = attempt + 1;
+    s.reconnectTimer = setTimeout(() => {
+      s.reconnectTimer = undefined;
+      void (async () => {
+        await s.credentialWrite;
+        await s.opening;
+        if (!s.socket && sessions.get(s.userId) === s) await open(s);
+      })().catch(() => scheduleReconnect(s));
+    }, delay);
+    s.reconnectTimer.unref();
+  }
+
   async function open(s: Session) {
-    if (s.opening || stopping) return;
+    if (s.opening || s.socket || s.removed || stopping) return;
+    clearTimeout(s.reconnectTimer);
+    s.reconnectTimer = undefined;
     // Baileys owns the auth files. This function only connects the user's directory
     // and translates its events into the small public session state above.
     s.opening = (async () => {
+      await s.credentialWrite;
       const { state, saveCreds } = await loadAuth(store.directory(s.userId));
       // DELETE may have completed while auth files were loading.
-      if (stopping || (!s.linking && !s.jid)) return;
+      if (stopping || s.removed || (!s.linking && !s.jid)) return;
       const socket = makeSocket(state);
       s.socket = socket;
       // Baileys emits this whenever credentials or Signal keys change. Do not
@@ -191,6 +223,7 @@ export function createSessionManager(options: {
           // restore it later; runtime state stays in memory only.
           Promise.resolve()
             .then(async () => {
+              if (stopping || s.removed || s.socket !== socket) return;
               if (
                 [...sessions.values()].some(
                   (other) => other !== s && other.jid === jid,
@@ -205,7 +238,13 @@ export function createSessionManager(options: {
                   result === "user_has_other_account"
                 )
                   throw new HttpError(409, result);
-                if (!s.linking || sessions.get(s.userId) !== s) {
+                if (
+                  !s.linking ||
+                  s.removed ||
+                  stopping ||
+                  s.socket !== socket ||
+                  sessions.get(s.userId) !== s
+                ) {
                   if (result === "claimed")
                     await options.ownership.release(token);
                   return;
@@ -213,6 +252,7 @@ export function createSessionManager(options: {
               }
               s.jid = jid;
               s.connected = true;
+              s.reconnectAttempts = 0;
               s.linking = false;
               s.pairingToken = undefined;
               s.qr = undefined;
@@ -259,14 +299,19 @@ export function createSessionManager(options: {
             void (async () => {
               await s.credentialWrite;
               await s.opening;
-              if (s.linking && sessions.get(s.userId) === s && !stopping)
+              if (
+                s.linking &&
+                !s.removed &&
+                sessions.get(s.userId) === s &&
+                !stopping
+              )
                 await open(s);
             })();
           } else if (s.linking) {
             finishQr(s, new HttpError(503, "WhatsApp linking failed"));
             void remove(s, false);
           } else {
-            // The CMS decides when to request another connection attempt.
+            scheduleReconnect(s);
           }
         }
       };
@@ -284,6 +329,8 @@ export function createSessionManager(options: {
               ? error
               : new Error("WhatsApp connection failed");
           finishQr(s, connectionError);
+        } else {
+          scheduleReconnect(s);
         }
       })
       .finally(() => {
